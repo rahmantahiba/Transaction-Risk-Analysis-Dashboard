@@ -1,12 +1,9 @@
 import pandas as pd
 
 """
-
 Note:
-
 Ensure the dataset file is located
 in the "Dataset" folder relative to this script.
-
 """
 
 raw_df = pd.read_excel("Dataset/luxury_cosmetics_fraud_analysis_2025.xlsx")
@@ -24,9 +21,10 @@ clean_df = clean_df.fillna("Unknown")
 # Drop fraud column from cleaned dataset
 clean_df = clean_df.drop(columns=["Fraud_Flag"])
 
-# Shorten ID strings for easier processing
+# Shorten ID strings for easier display
 clean_df["transaction_id_short"] = clean_df["Transaction_ID"].astype(str).str[:8]
 clean_df["customer_id_short"] = clean_df["Customer_ID"].astype(str).str[:8]
+
 
 """
 Risk calculation logic
@@ -47,14 +45,22 @@ def calculate_likelihood(payment_method, loyalty_tier, transaction_time):
     elif loyalty_tier == "Bronze":
         score += 1
 
-    hour = int(str(transaction_time).split(":")[0])
-
-    if hour < 6 or hour > 22:
-        score += 1
+    try:
+        hour = int(str(transaction_time).split(":")[0])
+        if hour < 6 or hour > 22:
+            score += 1
+    except Exception:
+        pass
 
     return min(score, 5)
 
+
 def calculate_impact(amount):
+    try:
+        amount = float(amount)
+    except Exception:
+        return 1
+
     if amount < 50:
         return 1
     elif amount < 150:
@@ -66,17 +72,10 @@ def calculate_impact(amount):
     else:
         return 5
 
+
 def calculate_risk(likelihood, impact):
     return likelihood * impact
 
-clean_df["likelihood"] = clean_df.apply(
-    lambda row: calculate_likelihood(
-        row["Payment_Method"],
-        row["Customer_Loyalty_Tier"],
-        row["Transaction_Time"]
-    ),
-    axis=1
-)
 
 def categorize_risk(score):
     if score <= 3:
@@ -88,39 +87,76 @@ def categorize_risk(score):
     else:
         return "Severe"
 
-# Calculate impact score based on purchase amount
+
+"""
+Threat simulation logic
+"""
+
+def detect_sql_injection(user_input):
+    attack_patterns = [
+        "' OR",
+        " OR 1=1",
+        "--",
+        "UNION SELECT",
+        "DROP TABLE",
+        ";",
+        "'"
+    ]
+
+    user_input_lower = str(user_input).lower()
+
+    for pattern in attack_patterns:
+        if pattern.lower() in user_input_lower:
+            return True
+
+    return False
+
+
+"""
+Apply risk calculations
+"""
+
+clean_df["likelihood"] = clean_df.apply(
+    lambda row: calculate_likelihood(
+        row["Payment_Method"],
+        row["Customer_Loyalty_Tier"],
+        row["Transaction_Time"]
+    ),
+    axis=1
+)
+
 clean_df["impact"] = clean_df["Purchase_Amount"].apply(calculate_impact)
 
-# Calculate final risk score
 clean_df["risk_score"] = clean_df.apply(
     lambda row: calculate_risk(row["likelihood"], row["impact"]),
     axis=1
 )
 
-"""
-Sanity check
-"""
-
 clean_df["risk_level"] = clean_df["risk_score"].apply(categorize_risk)
 
-high_risk_transactions = []
 
-for _, row in clean_df.iterrows():
-    if row["risk_level"] in ["High", "Severe"]:
-        high_risk_transactions.append(row["Transaction_ID"])
+"""
+Sanity check — only runs when executed directly, not when imported
+"""
 
-print("Number of high-risk transactions:", len(high_risk_transactions))
+if __name__ == "__main__":
+    high_risk_transactions = []
 
-print(clean_df[["likelihood", "impact", "risk_score"]].describe())
-print(clean_df["risk_level"].value_counts())
+    for _, row in clean_df.iterrows():
+        if row["risk_level"] in ["High", "Severe"]:
+            high_risk_transactions.append(row["Transaction_ID"])
 
-print(clean_df.sample(5)[[
-    "Payment_Method",
-    "Customer_Loyalty_Tier",
-    "Transaction_Time",
-    "Purchase_Amount",
-    "likelihood",
-    "impact",
-    "risk_score",
-    "risk_level"
-]])
+    print("Number of high-risk transactions:", len(high_risk_transactions))
+    print(clean_df[["likelihood", "impact", "risk_score"]].describe())
+    print(clean_df["risk_level"].value_counts())
+
+    print(clean_df.sample(5)[[
+        "Payment_Method",
+        "Customer_Loyalty_Tier",
+        "Transaction_Time",
+        "Purchase_Amount",
+        "likelihood",
+        "impact",
+        "risk_score",
+        "risk_level"
+    ]])
