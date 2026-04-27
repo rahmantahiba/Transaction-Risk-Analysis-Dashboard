@@ -1,12 +1,13 @@
 import streamlit as st
 import pandas as pd
+import sqlite3
 import plotly.express as px
 
 from transaction_risk_analysis import clean_df
 
 st.set_page_config(
     page_title="Transaction Risk Analysis",
-    page_icon="📊",
+    page_icon="Logo/LuxeBeauty/favicon.ico",
     layout="wide"
 )
 
@@ -106,7 +107,17 @@ CHART_LAYOUT = dict(
 def load_data():
     return clean_df.copy()
 
+
+@st.cache_resource
+def get_sim_conn(_df):
+    """In-memory SQLite loaded from clean_df — used only for the SQL injection demo."""
+    conn = sqlite3.connect(":memory:", check_same_thread=False)
+    _df.to_sql("transactions", conn, index=False, if_exists="replace")
+    return conn
+
+
 df = load_data()
+sim_conn = get_sim_conn(df)
 
 RISK_ORDER = ["Low", "Moderate", "High", "Severe"]
 
@@ -388,6 +399,7 @@ elif page == "Risk Analysis":
         value=(min_amount, max_amount)
     )
 
+    # Filtering
     filtered_df = df[
         (df["risk_level"].isin(selected_risks)) &
         (df["Payment_Method"].isin(selected_payments)) &
@@ -397,19 +409,29 @@ elif page == "Risk Analysis":
 
     st.write(f"**{len(filtered_df):,} transactions match the selected filters.**")
 
-    high_value = filtered_df[
-        filtered_df["risk_level"].isin(["High", "Severe"])
-    ]["Purchase_Amount"].sum()
+    # --- Metrics Calculations ---
+    filtered_value = filtered_df["Purchase_Amount"].sum()
+
+    at_risk_value = filtered_df["Purchase_Amount"].sum()
+
+    # % of total dataset (not just filtered)
+    total_dataset_value = df["Purchase_Amount"].sum()
+
+    at_risk_pct = (at_risk_value / total_dataset_value * 100) if total_dataset_value > 0 else 0
 
     avg_likelihood = filtered_df["likelihood"].mean() if len(filtered_df) > 0 else 0
     avg_impact = filtered_df["impact"].mean() if len(filtered_df) > 0 else 0
 
-    metric1, metric2, metric3 = st.columns(3)
+    # --- Display Metrics ---
+    metric1, metric2, metric3, metric4, metric5 = st.columns(5)
 
-    metric1.metric("Filtered At-Risk Value", f"${high_value:,.2f}")
-    metric2.metric("Average Likelihood", f"{avg_likelihood:.2f}/5")
-    metric3.metric("Average Impact", f"{avg_impact:.2f}/5")
+    metric1.metric("Filtered Transaction Value", f"${filtered_value:,.2f}")
+    metric2.metric("Filtered Value", f"${at_risk_value:,.2f}")
+    metric3.metric("% of Total Value", f"{at_risk_pct:.1f}%")
+    metric4.metric("Average Likelihood", f"{avg_likelihood:.2f}/5")
+    metric5.metric("Average Impact", f"{avg_impact:.2f}/5")
 
+    # --- Table ---
     st.subheader("Highest-Risk Transactions")
 
     display_columns = [
@@ -433,12 +455,9 @@ elif page == "Risk Analysis":
         .head(200)
     )
 
-    st.dataframe(
-        display_df,
-        use_container_width=True,
-        hide_index=True
-    )
+    st.dataframe(display_df, use_container_width=True, hide_index=True)
 
+    # --- Risk Matrix ---
     st.subheader("Risk Matrix: Likelihood vs. Impact")
 
     matrix_df = (
@@ -455,15 +474,12 @@ elif page == "Risk Analysis":
         y="impact",
         z="risk_score",
         text_auto="count",
-
-        # 👇 MUST be inside the function
         color_continuous_scale=[
             [0.0, "#22c55e"],
             [0.4, "#eab308"],
             [0.7, "#f97316"],
             [1.0, "#ef4444"]
         ],
-
         labels={
             "likelihood": "Likelihood Score",
             "impact": "Impact Score",
@@ -494,43 +510,167 @@ elif page == "Risk Analysis":
 # -----------------------------
 elif page == "Threat Simulation":
     st.title("Threat Simulation: SQL Injection")
+    st.markdown("""<div class="info-box">
+        Both queries below execute live against a real in-memory database loaded from your transaction dataset.
+        The <strong>vulnerable</strong> side actually runs the injected SQL — you can see the attack succeed in real time.
+        The <strong>safe</strong> side shows how parameterized queries neutralize the exact same payload.
+        </div>""", unsafe_allow_html=True)
 
-    st.write(
-        "This section demonstrates how unsafe SQL string concatenation can create a security risk "
-        "and how parameterized queries reduce that risk. No database is used and no query is executed."
-    )
+    # ── Attack type selector ────────────────────────────────
+    st.markdown("#### Step 1 — Choose an attack type")
+    attack_type = st.selectbox("Attack type", [
+        "Authentication bypass  (' OR '1'='1)",
+        "UNION data extraction",
+        "Comment injection",
+        "Always-true with comment  (' OR 1=1 --)",
+        "Custom payload",
+    ])
 
-    user_input = st.text_input(
-        "Enter sample customer input",
-        value="' OR '1'='1"
-    )
+    PRESETS = {
+        "Authentication bypass  (' OR '1'='1)": "' OR '1'='1",
+        "UNION data extraction": "' UNION SELECT Transaction_ID, Customer_ID, Payment_Method, risk_level, Purchase_Amount FROM transactions --",
+        "Comment injection": "CUST-0001' --",
+        "Always-true with comment  (' OR 1=1 --)": "' OR 1=1 --",
+        "Custom payload": "",
+    }
 
-    unsafe_query = f"SELECT * FROM transactions WHERE Customer_ID = '{user_input}'"
-    safe_query = "SELECT * FROM transactions WHERE Customer_ID = ?"
+    EXPLANATIONS = {
+        "Authentication bypass  (' OR '1'='1)":
+            "Closes the string quote early, then appends `OR '1'='1'` — a condition that is always true. Every row in the database is returned instead of just the target customer.",
+        "UNION data extraction":
+            "Appends a second `SELECT` via `UNION`. The attacker selects columns they want to steal from the `transactions` table and merges them into the original result set.",
+        "Comment injection":
+            "Appends `--` which comments out the rest of the SQL. Any trailing conditions (e.g. `AND active=1`) are silently ignored.",
+        "Always-true with comment  (' OR 1=1 --)":
+            "`1=1` is always true, so the WHERE clause always passes. Combined with `--` it drops any additional filters.",
+        "Custom payload":
+            "Write your own SQL injection payload and observe the result on both sides.",
+    }
 
-    col1, col2 = st.columns(2)
+    default_val = PRESETS[attack_type]
+    st.markdown("#### Step 2 — Edit the payload (optional)")
+    user_input = st.text_input("Payload injected as the Customer ID value:", value=default_val,
+                               placeholder="Type a custom payload...")
 
-    with col1:
-        st.subheader("Unsafe Query")
-        st.code(unsafe_query, language="sql")
+    st.markdown(f"""
+        <div style='background:rgba(239,68,68,0.07); border:1px solid rgba(239,68,68,0.25);
+                    border-radius:10px; padding:12px 16px; margin:8px 0 20px 0;
+                    font-size:0.84rem; color:#fca5a5;'>
+            <strong>How this attack works:</strong> {EXPLANATIONS[attack_type]}
+        </div>""", unsafe_allow_html=True)
+
+    st.markdown("#### Step 3 — Fire the attack")
+    st.markdown("---")
+
+    col_v, col_s = st.columns(2)
+
+    # ── VULNERABLE SIDE ──────────────────────────────────────
+    with col_v:
+        st.markdown("<span class='attack-badge'>⚠ Vulnerable — String Concatenation</span>", unsafe_allow_html=True)
+
+        vuln_query = f"SELECT * FROM transactions WHERE Customer_ID = '{user_input}' LIMIT 200"
+        st.markdown(f"<div class='terminal danger'>{vuln_query}</div>", unsafe_allow_html=True)
+
+        vuln_result = None
+        vuln_error = None
+        vuln_rows = 0
+
+        try:
+            vuln_result = pd.read_sql_query(vuln_query, sim_conn)
+            vuln_rows = len(vuln_result)
+        except Exception as e:
+            vuln_error = str(e)
+
+        if vuln_error:
+            st.markdown(f"""<div class='result-box' style='border:1px solid #7f1d1d; color:#fca5a5;'>
+                    ✗ Query error — {vuln_error}
+                </div>""", unsafe_allow_html=True)
+        else:
+            injected = vuln_rows > 1
+            color = "#fca5a5" if injected else "#86efac"
+            icon = "🚨 ATTACK SUCCEEDED" if injected else "✓ No injection detected"
+            border = "#7f1d1d" if injected else "#14532d"
+            st.markdown(f"""<div class='result-box' style='border:1px solid {border}; color:{color};'>
+                    {icon} — <strong>{vuln_rows:,}</strong> row(s) returned
+                </div>""", unsafe_allow_html=True)
+
+            if vuln_result is not None and not vuln_result.empty:
+                show_cols = [c for c in ["Customer_ID", "Transaction_ID", "Payment_Method",
+                                         "risk_level", "risk_score", "Purchase_Amount"]
+                             if c in vuln_result.columns]
+                st.dataframe(vuln_result[show_cols].head(15),
+                             use_container_width=True, hide_index=True)
+
+    # ── SAFE SIDE ────────────────────────────────────────────
+    with col_s:
+        st.markdown("<span class='safe-badge'>✓ Safe — Parameterized Query</span>", unsafe_allow_html=True)
+
+        safe_query = "SELECT * FROM transactions WHERE Customer_ID = ? LIMIT 200"
+        st.markdown(f"<div class='terminal safe'>{safe_query}\n\n-- Bound value → \"{user_input}\"</div>",
+                    unsafe_allow_html=True)
+
+        safe_result = None
+        safe_error = None
+        safe_rows = 0
+
+        try:
+            safe_result = pd.read_sql_query(safe_query, sim_conn, params=(user_input,))
+            safe_rows = len(safe_result)
+        except Exception as e:
+            safe_error = str(e)
+
+        if safe_error:
+            st.markdown(f"""<div class='result-box' style='border:1px solid #7f1d1d; color:#fca5a5;'>
+                    ✗ Query error — {safe_error}
+                </div>""", unsafe_allow_html=True)
+        else:
+            st.markdown(f"""<div class='result-box' style='border:1px solid #14532d; color:#86efac;'>
+                    ✓ Injection neutralized — <strong>{safe_rows}</strong> row(s) returned
+                </div>""", unsafe_allow_html=True)
+
+            if safe_result is not None and not safe_result.empty:
+                show_cols = [c for c in ["Customer_ID", "Transaction_ID", "Payment_Method",
+                                         "risk_level", "risk_score", "Purchase_Amount"]
+                             if c in safe_result.columns]
+                st.dataframe(safe_result[show_cols].head(15),
+                             use_container_width=True, hide_index=True)
+            else:
+                st.markdown("""<div style='color:#64748b; font-size:0.82rem; font-family:monospace;
+                                               margin-top:12px; text-align:center; padding:20px;'>
+                        No matching customer found.<br>Payload treated as a literal string — attack blocked.
+                    </div>""", unsafe_allow_html=True)
+
+    # ── What happened ────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("#### What just happened?")
+
+    if vuln_rows > safe_rows and vuln_rows > 1:
+        st.error(f"""
+    **Attack succeeded on the vulnerable side.**
+    The payload broke out of the intended `WHERE Customer_ID = '...'` filter and returned
+    **{vuln_rows:,} rows** from the database — far more than the 0 or 1 the application expected.
+
+    On the safe side, the exact same payload was bound as a plain string value.
+    The database driver never parsed it as SQL, so it returned **{safe_rows} row(s)** — attack blocked.
+            """)
+    elif vuln_error:
         st.warning(
-            "This query directly inserts user input into the SQL statement. "
-            "Malicious input could change the query behavior."
-        )
-
-    with col2:
-        st.subheader("Safer Query")
-        st.code(safe_query, language="sql")
+            "The payload caused a SQL syntax error on the vulnerable side — still a sign of injection vulnerability. In a real system, error messages themselves can leak database structure to an attacker.")
+    else:
         st.success(
-            "This query uses a placeholder, so the input is treated as data instead of executable SQL code."
-        )
+            f"Both queries returned **{safe_rows}** row(s). This payload didn't alter the row count (e.g. `DROP TABLE` is blocked by SQLite's single-statement safety). Try **Authentication bypass** or **UNION data extraction** to see a successful attack.")
 
-    st.subheader("Why This Matters")
-    st.write(
-        "A transaction risk system may handle sensitive customer and purchase information. "
-        "This simulation shows why secure coding practices are important when building systems that store or analyze transaction data."
-    )
+    # ── Mitigation checklist ─────────────────────────────────
+    st.markdown("---")
+    st.markdown("#### Mitigation Checklist")
 
+    st.markdown("""
+    - Always use parameterized queries or prepared statements — never concatenate user input into SQL.
+    - Validate and sanitize input: type-check, length-limit, and allowlist expected formats.
+    - Use an ORM (SQLAlchemy, Django ORM) which parameterizes by default.
+    - Apply the principle of least privilege — DB accounts should only have the permissions they need.
+    - Log and alert on anomalous query patterns: mass row returns, repeated errors, or UNION keywords.
+    """)
 
 # -----------------------------
 # NIST Framework
