@@ -15,7 +15,8 @@ from transaction_risk_analysis import (
     calculate_likelihood,
     calculate_impact,
     calculate_risk,
-    categorize_risk
+    categorize_risk,
+    detect_sql_injection
 )
 
 class TestRiskModel(unittest.TestCase):
@@ -41,6 +42,28 @@ class TestRiskModel(unittest.TestCase):
         self.assertEqual(calculate_likelihood("Gift Card", "None", "23:30:00"), 5)
         self.assertEqual(calculate_likelihood("Mobile Payment", "Bronze", "14:00:00"), 2)
         self.assertEqual(calculate_likelihood("Credit Card", "VIP", "13:00:00"), 0)
+
+class TestThreatSimulation(unittest.TestCase):
+
+        def test_basic_sql_injection_detected(self):
+            payload = "' OR '1'='1"
+            self.assertTrue(detect_sql_injection(payload))
+
+        def test_or_one_equals_one_detected(self):
+            payload = "' OR 1=1 --"
+            self.assertTrue(detect_sql_injection(payload))
+
+        def test_union_attack_detected(self):
+            payload = "' UNION SELECT * FROM transactions --"
+            self.assertTrue(detect_sql_injection(payload))
+
+        def test_drop_table_detected(self):
+            payload = "'; DROP TABLE transactions; --"
+            self.assertTrue(detect_sql_injection(payload))
+
+        def test_normal_customer_id_not_detected(self):
+            payload = "CUST12345"
+            self.assertFalse(detect_sql_injection(payload))
 
 if __name__ == "__main__":
     unittest.main()
